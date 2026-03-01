@@ -225,6 +225,13 @@ This project is under active development. See our [GitHub Issues](https://github
 
 We're focusing on providing a drop-in replacement for common ONNX Runtime use cases, particularly for embeddings and inference tasks.
 
+## Releases
+
+Tagged releases (`v*`) publish signed artifacts to `releases.amikos.tech`.
+
+- Runbook: [docs/releases.md](docs/releases.md)
+- Metadata endpoint: `https://releases.amikos.tech/pure-onnx/latest.json`
+
 ## Local CI Guardrails
 
 Install repository-managed git hooks once per clone:
