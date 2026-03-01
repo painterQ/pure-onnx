@@ -3,25 +3,35 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
+  id-token: write
+
+env:
+  GO_VERSION_STABLE: "1.24.x"
+  BUCKET: releases
 
 jobs:
   release:
-    name: Create Release
+    name: Build, sign, and publish release
     runs-on: ubuntu-latest
+    env:
+      PROJECT: ${{ github.event.repository.name }}
+      VERSION: ${{ github.ref_name }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      RELEASES_DOMAIN: ${{ vars.RELEASES_DOMAIN || 'releases.amikos.tech' }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
         with:
-          go-version: '1.24.x'
+          go-version: ${{ env.GO_VERSION_STABLE }}
           cache: true
 
       - name: Get dependencies
@@ -30,37 +40,213 @@ jobs:
       - name: Run tests
         run: go test -v ./...
 
-      - name: Build
-        run: go build -v ./...
+      - name: Build release bundles
+        run: make release RELEASE_VERSION="${VERSION}"
 
-      - name: Generate changelog
-        id: changelog
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: sha256sum -- *.tar.gz > SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+
+      - name: Sign all artifacts (keyless)
+        working-directory: dist
         run: |
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -z "$PREVIOUS_TAG" ]; then
-            echo "No previous tag found, including all commits"
-            CHANGELOG=$(git log --pretty=format:"- %s" --reverse)
-          else
-            echo "Generating changelog from $PREVIOUS_TAG to ${{ github.ref_name }}"
-            CHANGELOG=$(git log --pretty=format:"- %s" --reverse $PREVIOUS_TAG..${{ github.ref_name }})
+          set -euo pipefail
+          ISSUER="https://token.actions.githubusercontent.com"
+          for f in *.tar.gz; do
+            cosign sign-blob --yes \
+              --oidc-issuer "${ISSUER}" \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "${f}"
+          done
+
+          cosign sign-blob --yes \
+            --oidc-issuer "${ISSUER}" \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Verify signatures
+        working-directory: dist
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${TAG}"
+          ISSUER="https://token.actions.githubusercontent.com"
+
+          for f in *.tar.gz; do
+            cosign verify-blob \
+              --signature "${f}.sig" \
+              --certificate "${f}.pem" \
+              --certificate-identity "${IDENTITY}" \
+              --certificate-oidc-issuer "${ISSUER}" \
+              "${f}"
+          done
+
+          cosign verify-blob \
+            --signature SHA256SUMS.sig \
+            --certificate SHA256SUMS.pem \
+            --certificate-identity "${IDENTITY}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            SHA256SUMS
+
+      - name: Upload artifacts to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          aws --version
+          if [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ] || [ -z "${R2_ENDPOINT}" ]; then
+            echo "Missing required R2 credentials (R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT)."
+            exit 1
           fi
 
-          # Save changelog to file for the release body
-          echo "## What's Changed" > changelog.md
-          echo "" >> changelog.md
-          echo "$CHANGELOG" >> changelog.md
-          echo "" >> changelog.md
-          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${{ github.ref_name }}" >> changelog.md
+          PREFIX="${PROJECT}/${VERSION}"
+          aws s3 cp dist/ "s3://${BUCKET}/${PREFIX}/" \
+            --recursive \
+            --endpoint-url "${R2_ENDPOINT}"
 
-          # Output for debugging
-          cat changelog.md
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n \
+            --arg version "${VERSION}" \
+            --arg date "${NOW}" \
+            --arg checksums_url "${PROJECT}/${VERSION}/SHA256SUMS" \
+            --arg checksums_full_url "https://${RELEASES_DOMAIN}/${PROJECT}/${VERSION}/SHA256SUMS" \
+            '{version: $version, date: $date, checksums_url: $checksums_url, checksums_full_url: $checksums_full_url}' > /tmp/latest.json
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          body_path: changelog.md
-          draft: false
-          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
-          generate_release_notes: true
+          aws s3 cp /tmp/latest.json "s3://${BUCKET}/${PROJECT}/latest.json" \
+            --endpoint-url "${R2_ENDPOINT}" \
+            --content-type "application/json" \
+            --cache-control "public, max-age=60"
+
+      - name: Update releases.json index (optional)
+        if: vars.RELEASE_INDEX_ENABLED == '1'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ISSUER="https://token.actions.githubusercontent.com"
+          IDENTITY="https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${TAG}"
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          RELEASES_JSON_PATH=/tmp/releases.json
+          RELEASES_FETCH_ERR="$(mktemp)"
+
+          set +e
+          aws s3 cp "s3://${BUCKET}/${PROJECT}/releases.json" "${RELEASES_JSON_PATH}" \
+            --endpoint-url "${R2_ENDPOINT}" 2>"${RELEASES_FETCH_ERR}"
+          fetch_status=$?
+          set -e
+
+          if [ "${fetch_status}" -ne 0 ]; then
+            if grep -Eiq "NoSuchKey|404|Not Found|does not exist" "${RELEASES_FETCH_ERR}"; then
+              echo '{"releases":[]}' > "${RELEASES_JSON_PATH}"
+            else
+              echo "Failed to fetch existing releases.json from R2"
+              cat "${RELEASES_FETCH_ERR}"
+              exit 1
+            fi
+          fi
+          rm -f "${RELEASES_FETCH_ERR}"
+
+          jq --arg version "${VERSION}" \
+             --arg date "${NOW}" \
+             --arg prefix "${PROJECT}/${VERSION}/" \
+             --arg checksums_url "${PROJECT}/${VERSION}/SHA256SUMS" \
+             --arg checksums_full_url "https://${RELEASES_DOMAIN}/${PROJECT}/${VERSION}/SHA256SUMS" \
+             '.releases = (
+                ([{
+                  version: $version,
+                  date: $date,
+                  prefix: $prefix,
+                  checksums_url: $checksums_url,
+                  checksums_full_url: $checksums_full_url
+                }] + (.releases // []))
+                | unique_by(.version)
+                | sort_by(.date)
+                | reverse
+                | .[:100]
+              )' "${RELEASES_JSON_PATH}" > /tmp/releases.new.json
+
+          mv /tmp/releases.new.json /tmp/releases.json
+
+          cosign sign-blob --yes \
+            --oidc-issuer "${ISSUER}" \
+            --output-signature /tmp/releases.json.sig \
+            --output-certificate /tmp/releases.json.pem \
+            /tmp/releases.json
+
+          cosign verify-blob \
+            --signature /tmp/releases.json.sig \
+            --certificate /tmp/releases.json.pem \
+            --certificate-identity "${IDENTITY}" \
+            --certificate-oidc-issuer "${ISSUER}" \
+            /tmp/releases.json
+
+          aws s3 cp /tmp/releases.json "s3://${BUCKET}/${PROJECT}/releases.json" \
+            --endpoint-url "${R2_ENDPOINT}" \
+            --content-type "application/json" \
+            --cache-control "public, max-age=60"
+          aws s3 cp /tmp/releases.json.sig "s3://${BUCKET}/${PROJECT}/releases.json.sig" \
+            --endpoint-url "${R2_ENDPOINT}" \
+            --content-type "application/octet-stream" \
+            --cache-control "public, max-age=60"
+          aws s3 cp /tmp/releases.json.pem "s3://${BUCKET}/${PROJECT}/releases.json.pem" \
+            --endpoint-url "${R2_ENDPOINT}" \
+            --content-type "application/x-pem-file" \
+            --cache-control "public, max-age=60"
+
+      - name: Purge latest.json from CDN cache
+        if: vars.CF_ZONE_ID != ''
+        env:
+          CF_ZONE_ID: ${{ vars.CF_ZONE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN is not set; skipping cache purge."
+            exit 0
+          fi
+          curl -sf -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"files\":[\"https://${RELEASES_DOMAIN}/${PROJECT}/latest.json\"]}"
+
+      - name: Purge releases index from CDN cache (optional)
+        if: vars.CF_ZONE_ID != '' && vars.RELEASE_INDEX_ENABLED == '1'
+        env:
+          CF_ZONE_ID: ${{ vars.CF_ZONE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN is not set; skipping cache purge."
+            exit 0
+          fi
+          curl -sf -X POST \
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
+            -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data "{\"files\":[\"https://${RELEASES_DOMAIN}/${PROJECT}/releases.json\",\"https://${RELEASES_DOMAIN}/${PROJECT}/releases.json.sig\",\"https://${RELEASES_DOMAIN}/${PROJECT}/releases.json.pem\"]}"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          tag_name: ${{ github.ref_name }}
+          overwrite_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/*.sig
+            dist/*.pem

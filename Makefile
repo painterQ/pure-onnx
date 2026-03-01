@@ -12,6 +12,10 @@ GOVULNCHECK := $(shell $(GO) env GOPATH)/bin/govulncheck
 GOLANGCI_LINT_VERSION ?= v2.8.0
 GOSEC_VERSION ?= v2.23.0
 PRECOMMIT_BASE_REF ?= origin/main
+RELEASE_PLATFORMS ?= linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
+RELEASE_VERSION ?= $(shell git describe --tags --always)
+RELEASE_DIR := build/release
+RELEASE_BINARIES := basic inference
 
 # ONNX Runtime version (supports API v22)
 ORT_VERSION := 1.23.1
@@ -49,7 +53,7 @@ GREEN := \033[0;32m
 YELLOW := \033[1;33m
 NC := \033[0m # No Color
 
-.PHONY: all build test test-race clean fmt fmt-check vet lint precommit-lint-new gosec verify help install-tools download-ort list-ort-versions check-mod-tidy vulncheck precommit install-hooks
+.PHONY: all build release test test-race clean fmt fmt-check vet lint precommit-lint-new gosec verify help install-tools download-ort list-ort-versions check-mod-tidy vulncheck precommit install-hooks
 
 ## help: Show this help message
 help:
@@ -71,6 +75,31 @@ build:
 	@echo "$(YELLOW)Building $(PROJECT_NAME)...$(NC)"
 	$(GO) build $(GOFLAGS) ./...
 	@echo "$(GREEN)✓ Build complete$(NC)"
+
+## release: Build cross-platform release bundles in dist/
+release:
+	@echo "$(YELLOW)Building release bundles for $(RELEASE_VERSION)...$(NC)"
+	@mkdir -p dist $(RELEASE_DIR)
+	@rm -f dist/$(PROJECT_NAME)-$(RELEASE_VERSION)-*.tar.gz
+	@bash -euo pipefail -c '\
+	for platform in $(RELEASE_PLATFORMS); do \
+		os=$${platform%-*}; \
+		arch=$${platform##*-}; \
+		stage_dir="$(RELEASE_DIR)/$(PROJECT_NAME)-$(RELEASE_VERSION)-$$os-$$arch"; \
+		echo "Packaging $$os/$$arch..."; \
+		rm -rf "$$stage_dir"; \
+		mkdir -p "$$stage_dir/bin"; \
+		ext=""; \
+		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build $(GOFLAGS) -o "$$stage_dir/bin/basic$$ext" ./examples/basic; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build $(GOFLAGS) -o "$$stage_dir/bin/inference$$ext" ./examples/inference; \
+		cp README.md "$$stage_dir/README.md"; \
+		printf "Artifact bundle for %s %s (%s/%s)\nContains binaries: %s\n" \
+			"$(PROJECT_NAME)" "$(RELEASE_VERSION)" "$$os" "$$arch" "$(RELEASE_BINARIES)" > "$$stage_dir/ARTIFACTS.txt"; \
+		tar -czf "dist/$(PROJECT_NAME)-$(RELEASE_VERSION)-$$os-$$arch.tar.gz" \
+			-C "$(RELEASE_DIR)" "$(PROJECT_NAME)-$(RELEASE_VERSION)-$$os-$$arch"; \
+	done'
+	@echo "$(GREEN)✓ Release bundles created in dist/$(NC)"
 
 ## test: Run tests
 test:
@@ -180,6 +209,7 @@ clean:
 	$(GO) clean ./...
 	rm -f coverage.out coverage.html
 	rm -rf $(ORT_DIR)
+	rm -rf dist $(RELEASE_DIR)
 	rm -f *.test
 	rm -f *.prof
 	@echo "$(GREEN)✓ Clean complete$(NC)"
