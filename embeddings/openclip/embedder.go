@@ -1034,6 +1034,7 @@ type preprocessorConfigFile struct {
 }
 
 func loadPreprocessorConfig(path string) (clipPreprocessorConfig, error) {
+	// #nosec G304 -- path is validated by NewEmbedder before this call.
 	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return clipPreprocessorConfig{}, err

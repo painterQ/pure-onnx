@@ -5,10 +5,13 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestEnsureModelAssetsDownloadsAndCaches(t *testing.T) {
@@ -45,17 +48,21 @@ func TestEnsureModelAssetsDownloadsAndCaches(t *testing.T) {
 
 	tempDir := t.TempDir()
 	shaByFile := map[string]string{}
+	sizeByFile := map[string]int64{}
 	for fileName, data := range assetData {
 		shaByFile[fileName] = sha256Hex(data)
+		sizeByFile[fileName] = int64(len(data))
 	}
 
 	cfg := bootstrapConfig{
-		repoID:    repoID,
-		revision:  revision,
-		baseURL:   server.URL,
-		cacheDir:  tempDir,
-		verifySHA: true,
-		shaByFile: shaByFile,
+		repoID:             repoID,
+		revision:           revision,
+		baseURL:            server.URL,
+		cacheDir:           tempDir,
+		verifySHA:          true,
+		shaByFile:          shaByFile,
+		expectedSizeByFile: sizeByFile,
+		maxDownloadBytes:   1024 * 1024,
 		httpClient: &http.Client{
 			Transport: http.DefaultTransport,
 		},
@@ -103,21 +110,78 @@ func TestEnsureAssetFileReplacesCorruptFile(t *testing.T) {
 
 	expected := sha256Hex([]byte("good-content"))
 	cfg := bootstrapConfig{
-		repoID:    "repo/test",
-		revision:  "main",
-		baseURL:   server.URL,
-		cacheDir:  tempDir,
-		verifySHA: true,
-		shaByFile: map[string]string{textModelFileName: expected},
+		repoID:             "repo/test",
+		revision:           "main",
+		baseURL:            server.URL,
+		cacheDir:           tempDir,
+		verifySHA:          true,
+		shaByFile:          map[string]string{textModelFileName: expected},
+		expectedSizeByFile: map[string]int64{textModelFileName: int64(len("good-content"))},
+		maxDownloadBytes:   1024 * 1024,
 		httpClient: &http.Client{
 			Transport: http.DefaultTransport,
 		},
 	}
 
-	if err := ensureAssetFile(cfg, destination, textModelFileName, expected); err != nil {
+	if err := ensureAssetFile(cfg, destination, textModelFileName, expected, int64(len("good-content"))); err != nil {
 		t.Fatalf("ensureAssetFile failed: %v", err)
 	}
 	assertFileContains(t, destination, []byte("good-content"))
+}
+
+func TestDownloadFileOnceRejectsOversizeByContentLength(t *testing.T) {
+	payload := strings.Repeat("x", 64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "64")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer server.Close()
+
+	destination := filepath.Join(t.TempDir(), "asset.bin")
+	err := downloadFileOnce(&http.Client{}, server.URL+"/asset.bin", destination, "", 32, 0)
+	if err == nil || !strings.Contains(err.Error(), "content-length") {
+		t.Fatalf("expected content-length oversize error, got: %v", err)
+	}
+}
+
+func TestAcquireFileLockTimeout(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "asset.lock")
+	first, err := acquireFileLock(lockPath, time.Second, time.Hour)
+	if err != nil {
+		t.Fatalf("failed to acquire first lock: %v", err)
+	}
+	defer func() {
+		_ = first.Release()
+	}()
+
+	_, err = acquireFileLock(lockPath, 200*time.Millisecond, time.Hour)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timed out lock acquisition, got: %v", err)
+	}
+}
+
+func TestRedirectPolicyRejectsHTTPSDowngrade(t *testing.T) {
+	policy := makeRedirectPolicy(DefaultBootstrapBaseURL)
+	req := &http.Request{URL: mustParseURL(t, "http://example.com/file")}
+	via := []*http.Request{
+		{URL: mustParseURL(t, "https://huggingface.co/repo/resolve/main/file")},
+	}
+	err := policy(req, via)
+	if err == nil || !strings.Contains(err.Error(), "downgrade") {
+		t.Fatalf("expected HTTPS downgrade rejection, got: %v", err)
+	}
+}
+
+func TestIsAllowedRedirectHost(t *testing.T) {
+	if !isAllowedRedirectHost("huggingface.co", "cas-bridge.xethub.hf.co") {
+		t.Fatalf("expected hf.co subdomain to be allowed")
+	}
+	if isAllowedRedirectHost("huggingface.co", "example.com") {
+		t.Fatalf("expected unrelated host to be rejected")
+	}
+	if !isAllowedRedirectHost("my.mirror.local", "cdn.my.mirror.local") {
+		t.Fatalf("expected subdomain of custom host to be allowed")
+	}
 }
 
 func TestIsRetryableDownloadError(t *testing.T) {
@@ -142,6 +206,16 @@ func TestEnsureDefaultAssetsValidation(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultAssetsCustomRepoRequiresChecksums(t *testing.T) {
+	_, err := EnsureDefaultAssets(
+		WithBootstrapRepoID("custom/repo"),
+		WithBootstrapRevision("main"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "missing checksum") {
+		t.Fatalf("expected missing checksum error for custom repo without explicit checksums, got: %v", err)
+	}
+}
+
 func assertFileContains(t *testing.T, path string, expected []byte) {
 	t.Helper()
 	got, err := os.ReadFile(path)
@@ -151,6 +225,15 @@ func assertFileContains(t *testing.T, path string, expected []byte) {
 	if string(got) != string(expected) {
 		t.Fatalf("unexpected file content at %q: got %q, want %q", path, string(got), string(expected))
 	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("failed to parse URL %q: %v", raw, err)
+	}
+	return parsed
 }
 
 func sha256Hex(data []byte) string {
