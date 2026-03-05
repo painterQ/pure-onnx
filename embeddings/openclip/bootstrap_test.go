@@ -345,6 +345,9 @@ func TestSanitizeBootstrapPathComponentRejectsTraversal(t *testing.T) {
 	if _, err := sanitizeBootstrapPathComponent("..", "repo ID"); err == nil {
 		t.Fatalf("expected traversal rejection for dot-segment repo ID")
 	}
+	if _, err := sanitizeBootstrapPathComponent("repo\\..\\owner", "repo ID"); err == nil {
+		t.Fatalf("expected traversal rejection for backslash segment repo ID")
+	}
 	if _, err := sanitizeBootstrapPathComponent("owner/repo", "repo ID"); err != nil {
 		t.Fatalf("expected slash replacement to be accepted, got: %v", err)
 	}
