@@ -244,7 +244,7 @@ func TestEnsureAssetFileRejectsDownloadedChecksumMismatch(t *testing.T) {
 		baseURL:            server.URL,
 		cacheDir:           tempDir,
 		verifySHA:          true,
-		shaByFile:          map[string]string{textModelFileName: "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"},
+		shaByFile:          map[string]string{textModelFileName: "0000000000000000000000000000000000000000000000000000000000000000"},
 		expectedSizeByFile: map[string]int64{textModelFileName: int64(len("bad-content"))},
 		maxDownloadBytes:   defaultMaxDownloadBytes,
 		httpClient:         &http.Client{Transport: http.DefaultTransport},
