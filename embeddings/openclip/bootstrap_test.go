@@ -230,6 +230,83 @@ func TestEnsureAssetFileReplacesCorruptFile(t *testing.T) {
 	assertFileContains(t, destination, []byte("good-content"))
 }
 
+func TestEnsureAssetFileRejectsEmptyCachedFileWithoutVerification(t *testing.T) {
+	tempDir := t.TempDir()
+	destination := filepath.Join(tempDir, textModelFileName)
+	if err := os.WriteFile(destination, []byte{}, 0o600); err != nil {
+		t.Fatalf("failed to seed empty cached file: %v", err)
+	}
+
+	cfg := bootstrapConfig{
+		repoID:           "repo/test",
+		revision:         "main",
+		baseURL:          "http://example.invalid",
+		cacheDir:         tempDir,
+		verifySHA:        false,
+		maxDownloadBytes: defaultMaxDownloadBytes,
+		httpClient: &http.Client{
+			Transport: http.DefaultTransport,
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("downloaded"))
+	}))
+	defer server.Close()
+	cfg.baseURL = server.URL
+
+	if err := ensureAssetFile(cfg, destination, textModelFileName, "", 0); err != nil {
+		t.Fatalf("ensureAssetFile failed: %v", err)
+	}
+	assertFileContains(t, destination, []byte("downloaded"))
+}
+
+func TestEnsureAssetFileRejectsNonFileCacheEntry(t *testing.T) {
+	tempDir := t.TempDir()
+	destination := filepath.Join(tempDir, textModelFileName)
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		t.Fatalf("failed to seed directory cache entry: %v", err)
+	}
+
+	cfg := bootstrapConfig{
+		repoID:           "repo/test",
+		revision:         "main",
+		baseURL:          "http://example.invalid",
+		cacheDir:         tempDir,
+		verifySHA:        false,
+		httpClient:       &http.Client{},
+		maxDownloadBytes: defaultMaxDownloadBytes,
+	}
+	if err := ensureAssetFile(cfg, destination, textModelFileName, "", 0); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("expected non-regular cache path error, got: %v", err)
+	}
+}
+
+func TestEnsureAssetFileReturnsStatError(t *testing.T) {
+	tempDir := t.TempDir()
+	cfg := bootstrapConfig{
+		repoID:           "repo/test",
+		revision:         "main",
+		baseURL:          "http://example.invalid",
+		cacheDir:         tempDir,
+		verifySHA:        false,
+		httpClient:       &http.Client{},
+		maxDownloadBytes: defaultMaxDownloadBytes,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("should not reach network for stat error path")
+	}))
+	defer server.Close()
+	cfg.baseURL = server.URL
+
+	err := ensureAssetFile(cfg, "/\x00", textModelFileName, "", 0)
+	if err == nil {
+		t.Fatalf("expected stat error")
+	}
+	if !strings.Contains(err.Error(), "failed to inspect cached") && !strings.Contains(err.Error(), "acquire bootstrap lock") {
+		t.Fatalf("unexpected error for invalid destination path: %v", err)
+	}
+}
+
 func TestDownloadFileOnceRejectsOversizeByContentLength(t *testing.T) {
 	payload := strings.Repeat("x", 64)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +345,19 @@ func TestDownloadFileOnceRejectsOversizeWithoutContentLength(t *testing.T) {
 	}
 }
 
+func TestDownloadFileOnceRejectsExpectedSizeMismatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("0123456789")) // 10 bytes
+	}))
+	defer server.Close()
+
+	destination := filepath.Join(t.TempDir(), "asset.bin")
+	err := downloadFileOnce(&http.Client{}, server.URL+"/asset.bin", destination, "", 16, 11)
+	if err == nil || !strings.Contains(err.Error(), "downloaded size mismatch") {
+		t.Fatalf("expected size mismatch error, got: %v", err)
+	}
+}
+
 func TestDownloadFileWithRetryRetryableHTTPStatus(t *testing.T) {
 	var attempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -296,6 +386,41 @@ func TestDownloadFileWithRetryRetryableHTTPStatus(t *testing.T) {
 		t.Fatalf("expected 2 attempts for retryable status, got %d", attempts)
 	}
 	assertFileContains(t, destination, []byte("ok"))
+}
+
+func TestDownloadFileWithRetryIncludesIntermediateErrors(t *testing.T) {
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		switch attempts {
+		case 1:
+			http.Error(w, "temporary error", http.StatusInternalServerError)
+		case 2:
+			http.Error(w, "still temporary", http.StatusServiceUnavailable)
+		case 3:
+			http.Error(w, "not retryable", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	destination := filepath.Join(t.TempDir(), "asset.bin")
+	err := downloadFileWithRetry(
+		&http.Client{},
+		server.URL+"/asset.bin",
+		destination,
+		"",
+		16,
+		2,
+	)
+	if err == nil {
+		t.Fatalf("expected download failure")
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+	if !strings.Contains(err.Error(), "attempt 1") || !strings.Contains(err.Error(), "attempt 2") || !strings.Contains(err.Error(), "attempt 3") {
+		t.Fatalf("expected error to include all attempts, got: %v", err)
+	}
 }
 
 func TestDownloadFileWithRetryDoesNotRetryClientError(t *testing.T) {

@@ -240,6 +240,10 @@ Defaults are aligned with the pinned OpenCLIP export contract:
 Built-in bootstrap can download and cache the default model bundle:
 - repo: `amikos/openclip-vit-b-32-laion2b-s34b-b79k-onnx`
 - revision: `248a2ed76a7189fc080e654e36930171331ef085`
+- cache directory env var: `ONNXRUNTIME_OPENCLIP_CACHE_DIR` (defaults to user cache, e.g. `~/.cache/onnx-purego/openclip`)
+- optional auth token env var: `HF_TOKEN` (adds Hugging Face bearer token for gated/private downloads)
+
+When `HF_TOKEN` is set, downloads require `https://` base URLs to avoid leaking credentials.
 
 ```go
 package main

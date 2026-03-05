@@ -485,11 +485,14 @@ func ensureAssetFile(cfg bootstrapConfig, destinationPath string, fileName strin
 	}()
 
 	staleReason := ""
-	hasSizeMismatch := false
 	if info, statErr := os.Stat(destinationPath); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("cached %s is not a regular file: %s", fileName, destinationPath)
+		}
 		switch {
+		case !cfg.verifySHA && expectedSize == 0 && info.Size() == 0:
+			staleReason = fmt.Sprintf("cached file %s is empty", fileName)
 		case expectedSize > 0 && info.Size() != expectedSize:
-			hasSizeMismatch = true
 			staleReason = fmt.Sprintf("cached file %s has unexpected size: got %d bytes, want %d bytes", fileName, info.Size(), expectedSize)
 		case cfg.verifySHA && expectedSHA256 != "":
 			if verifyErr := verifyFileSHA256(destinationPath, expectedSHA256); verifyErr != nil {
@@ -501,11 +504,13 @@ func ensureAssetFile(cfg bootstrapConfig, destinationPath string, fileName strin
 			return nil
 		}
 		if removeErr := os.Remove(destinationPath); removeErr != nil {
-			if hasSizeMismatch {
-				return fmt.Errorf("failed to remove stale %s after size mismatch: %w", fileName, removeErr)
+			if staleReason != "" {
+				return fmt.Errorf("failed to replace stale %s: %w", fileName, removeErr)
 			}
-			return fmt.Errorf("failed to remove stale %s after checksum mismatch: %w", fileName, removeErr)
+			return fmt.Errorf("failed to remove stale %s: %w", fileName, removeErr)
 		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("failed to inspect cached %s at %s: %w", fileName, destinationPath, statErr)
 	}
 
 	maxBytes := cfg.maxDownloadBytes
@@ -542,7 +547,9 @@ func ensureAssetFile(cfg bootstrapConfig, destinationPath string, fileName strin
 	}
 	if cfg.verifySHA && expectedSHA256 != "" {
 		if err := verifyFileSHA256(destinationPath, expectedSHA256); err != nil {
-			_ = os.Remove(destinationPath)
+			if removeErr := os.Remove(destinationPath); removeErr != nil {
+				return fmt.Errorf("downloaded %s failed checksum verification: %w", fileName, errors.Join(err, removeErr))
+			}
 			return fmt.Errorf("downloaded %s failed checksum verification: %w", fileName, err)
 		}
 	}
@@ -600,10 +607,12 @@ func resolveBootstrapBaseDir(cacheDir string, repoSlug string, revisionSlug stri
 
 func downloadFileWithRetry(client *http.Client, assetURL string, destinationPath string, hfToken string, maxBytes int64, expectedSize int64) error {
 	var lastErr error
+	var seenErrs []error
 	const maxAttempts = 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := downloadFileOnce(client, assetURL, destinationPath, hfToken, maxBytes, expectedSize); err != nil {
 			lastErr = err
+			seenErrs = append(seenErrs, fmt.Errorf("attempt %d: %w", attempt, err))
 			if !isRetryableDownloadError(err) || attempt == maxAttempts {
 				break
 			}
@@ -611,6 +620,9 @@ func downloadFileWithRetry(client *http.Client, assetURL string, destinationPath
 			continue
 		}
 		return nil
+	}
+	if len(seenErrs) > 1 {
+		return fmt.Errorf("failed to download %s after %d attempts: %w", assetURL, maxAttempts, errors.Join(seenErrs...))
 	}
 	return fmt.Errorf("failed to download %s after %d attempts: %w", assetURL, maxAttempts, lastErr)
 }
