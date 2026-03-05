@@ -111,7 +111,7 @@ func TestDefaultBootstrapConfigSkipsTestEnvVar(t *testing.T) {
 }
 
 func TestEnsureModelAssetsEscapesRepoIDAndRevisionInURL(t *testing.T) {
-	repoID := "owner/repo?token"
+	repoID := "owner/repo"
 	revision := "branch/with space"
 	assetData := map[string][]byte{
 		textModelFileName:    []byte("text-onnx"),
@@ -179,6 +179,21 @@ func TestEnsureModelAssetsEscapesRepoIDAndRevisionInURL(t *testing.T) {
 	defer mu.Unlock()
 	if requestCount != len(bootstrapAssetSpecs) {
 		t.Fatalf("expected %d requests, got %d", len(bootstrapAssetSpecs), requestCount)
+	}
+}
+
+func TestEscapeRepoIDForURL(t *testing.T) {
+	repoID := "owner/repo?token=abc&raw=value"
+	escaped := escapeRepoIDForURL(repoID)
+	parts := strings.Split(escaped, "/")
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 path segments, got %d: %q", len(parts), escaped)
+	}
+	if parts[1] == "repo?token=abc&raw=value" {
+		t.Fatalf("expected encoded repo segment, got %q", parts[1])
+	}
+	if expected := url.PathEscape("repo?token=abc&raw=value"); parts[1] != expected {
+		t.Fatalf("expected query-sensitive encoding in repo segment, got %q", parts[1])
 	}
 }
 
