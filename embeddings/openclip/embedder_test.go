@@ -315,15 +315,18 @@ func TestPreprocessImagesIntoValidation(t *testing.T) {
 	}
 }
 
-func TestGetRGBRespectsConvertRGBFlag(t *testing.T) {
+func TestGetRGBConvertsAccordingToConvertRGBFlag(t *testing.T) {
 	colorValue := color.NRGBA{R: 10, G: 20, B: 30, A: 255}
 	r, g, b := getRGB(colorValue, true)
 	if !float32Near(r, 10, 1e-7) || !float32Near(g, 20, 1e-7) || !float32Near(b, 30, 1e-7) {
 		t.Fatalf("expected RGB conversion path to preserve channels, got %.2f,%.2f,%.2f", r, g, b)
 	}
 	r, g, b = getRGB(colorValue, false)
-	if !float32Near(r, 10, 1e-7) || !float32Near(g, 20, 1e-7) || !float32Near(b, 30, 1e-7) {
-		t.Fatalf("expected non-convert RGB path to preserve color channels, got %.2f,%.2f,%.2f", r, g, b)
+	expectedGray := color.GrayModel.Convert(colorValue).(color.Gray).Y
+	if !float32Near(r, float32(expectedGray), 1e-7) ||
+		!float32Near(g, float32(expectedGray), 1e-7) ||
+		!float32Near(b, float32(expectedGray), 1e-7) {
+		t.Fatalf("expected non-convert path to map to grayscale, got %.2f,%.2f,%.2f", r, g, b)
 	}
 }
 
