@@ -206,7 +206,9 @@ python3 ./tools/splade_generate_golden.py \
   --top-k 24
 ```
 
-Run OpenCLIP golden-dataset parity check (optional):
+### OpenCLIP Golden-Dataset Parity (Optional)
+
+Run OpenCLIP golden-dataset parity check:
 ```bash
 export ONNXRUNTIME_LIB_PATH=/path/to/onnxruntime/lib/libonnxruntime.so
 export HF_DATASET_REPO=tazarov/pure-onnx
@@ -251,7 +253,7 @@ The CI pipeline runs tests in multiple configurations:
 - **Integration Tests (matrix job)**: Skipped in the cross-platform matrix (no ONNX Runtime library preinstalled)
 - **Real-model Integration Job**: Linux job downloads ONNX Runtime, runs all-MiniLM integration + memory stability tests, runs SPLADE integration and hosted parity, runs OpenCLIP integration and hosted parity, and runs all-MiniLM benchmarks
 - **Race Detection**: Partially disabled due to checkptr incompatibility with purego FFI
-- **Vulnerability Check**: Runs `make vulncheck` with a patched Go baseline (`go1.24.13+auto`)
+- **Vulnerability Check**: Runs `make vulncheck` with a patched Go baseline (`go1.25.8+auto`)
 
 ### Local Pre-commit Checks
 

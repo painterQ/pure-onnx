@@ -292,6 +292,20 @@ Similarity helpers are also available:
 - `openclip.CosineSimilarity(a, b)`
 - `openclip.CLIPSimilarityLogits(imageEmbeddings, textEmbeddings, openclip.DefaultCLIPLogitScale)`
 
+Runnable OpenCLIP example:
+- `examples/openclip/main.go`
+- `examples/openclip/README.md`
+- `examples/openclip/ATTRIBUTION.md`
+
+Run it with:
+
+```bash
+cd examples/openclip
+go run .
+```
+
+OpenCLIP test instructions and commands are documented in [`TESTING.md`](TESTING.md).
+
 ### OpenCLIP ONNX Export Tooling (`tools/openclip_export_onnx.py`)
 
 To generate pinned OpenCLIP ONNX artifacts (split text + vision encoders):
@@ -367,7 +381,7 @@ The pre-commit hook runs:
 - `make gosec`
 - `go test ./...`
 - `make check-mod-tidy`
-- `make vulncheck` (with patched Go toolchain baseline `go1.24.13+auto`)
+- `make vulncheck` (with patched Go toolchain baseline `go1.25.8+auto`)
 
 Optional skip knobs:
 - `SKIP_LINT_NEW=1` (skip new-issues lint check)

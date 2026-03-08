@@ -10,8 +10,8 @@ on:
 env:
   GO_VERSION_STABLE: '1.24.x'
   # Keep vulncheck on a patched baseline to avoid stdlib CVE false-fails from older patch toolchains.
-  GO_VERSION_VULNCHECK: '1.24.13'
-  GO_VULNCHECK_TOOLCHAIN: 'go1.24.13+auto'
+  GO_VERSION_VULNCHECK: '1.25.8'
+  GO_VULNCHECK_TOOLCHAIN: 'go1.25.8+auto'
 
 jobs:
   lint:
@@ -41,6 +41,7 @@ jobs:
         run: |
           go vet -unsafeptr=false ./ort/...
           go vet -unsafeptr=false ./examples/basic/...
+          go vet -unsafeptr=false ./examples/openclip/...
           go vet ./embeddings/...
 
       - name: Run golangci-lint (PR new issues)
@@ -253,6 +254,7 @@ jobs:
       - name: Build examples
         run: |
           go build -v -o basic-example ./examples/basic
+          go build -v -o openclip-example ./examples/openclip
           go build -v -o experimental-example ./examples/experimental
 
   mod-tidy:
