@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"sync"
 	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
 // AdvancedSession represents an ONNX Runtime inference session
@@ -419,4 +421,134 @@ func uintptrSlicePtr(values []uintptr) *uintptr {
 	// Callers must KeepAlive(values) until ORT returns.
 	// #nosec G103 -- Required for CGO-free FFI to pass pointer arrays to ONNX Runtime C API.
 	return (*uintptr)(unsafe.Pointer(unsafe.SliceData(values)))
+}
+
+// NewSessionOptions creates a new SessionOptions instance
+func NewSessionOptions() (*SessionOptions, error) {
+	ortCallMu.RLock()
+	defer ortCallMu.RUnlock()
+
+	mu.Lock()
+	if ortAPI == nil || createSessionOptionsFunc == nil {
+		mu.Unlock()
+		return nil, fmt.Errorf("ONNX Runtime not initialized")
+	}
+	createSessionOptions := createSessionOptionsFunc
+	mu.Unlock()
+
+	var handle uintptr
+	status := createSessionOptions(&handle)
+	if status != 0 {
+		errMsg := getErrorMessage(status)
+		releaseStatus(status)
+		return nil, fmt.Errorf("failed to create session options: %s", errMsg)
+	}
+
+	options := &SessionOptions{
+		handle: handle,
+	}
+
+	runtime.SetFinalizer(options, func(o *SessionOptions) {
+		if err := o.Destroy(); err != nil {
+			logFinalizerWarning("WARNING: session options finalizer destroy failed: %v", err)
+		}
+	})
+
+	return options, nil
+}
+
+// Destroy releases the resources associated with the SessionOptions
+func (o *SessionOptions) Destroy() error {
+	if o == nil || o.handle == 0 {
+		return nil
+	}
+
+	ortCallMu.RLock()
+	defer ortCallMu.RUnlock()
+
+	mu.Lock()
+	handle := o.handle
+	releaseSessionOptions := releaseSessionOptionsFunc
+	o.handle = 0
+	mu.Unlock()
+
+	if handle != 0 && releaseSessionOptions != nil {
+		releaseSessionOptions(handle)
+	}
+
+	runtime.SetFinalizer(o, nil)
+	return nil
+}
+
+// AppendExecutionProviderCUDA appends the CUDA execution provider to the session options
+// Pass negative deviceID for default (device 0)
+func (o *SessionOptions) AppendExecutionProviderCUDA(deviceID int) error {
+	if o == nil || o.handle == 0 {
+		return fmt.Errorf("session options is nil or destroyed")
+	}
+
+	ortCallMu.RLock()
+	defer ortCallMu.RUnlock()
+
+	mu.Lock()
+	if ortAPI == nil {
+		mu.Unlock()
+		return fmt.Errorf("ONNX Runtime not initialized")
+	}
+	appendCUDAFunc := ortAPI.SessionOptionsAppendExecutionProvider_CUDA
+	mu.Unlock()
+
+	if appendCUDAFunc == 0 {
+		return fmt.Errorf("SessionOptionsAppendExecutionProvider_CUDA not available in ONNX Runtime")
+	}
+
+	var appendFunc func(sessionOptions uintptr, cudaOptions uintptr) uintptr
+	purego.RegisterFunc(&appendFunc, appendCUDAFunc)
+
+	var cudaOptions uintptr
+	if deviceID >= 0 {
+		var createOptionsFunc func(out *uintptr) uintptr
+		purego.RegisterFunc(&createOptionsFunc, ortAPI.CreateCUDAProviderOptions)
+
+		status := createOptionsFunc(&cudaOptions)
+		if status != 0 {
+			errMsg := getErrorMessage(status)
+			releaseStatus(status)
+			return fmt.Errorf("failed to create CUDA provider options: %s", errMsg)
+		}
+
+		var updateOptionsFunc func(optionsHandle uintptr, name uintptr, value uintptr) uintptr
+		purego.RegisterFunc(&updateOptionsFunc, ortAPI.UpdateCUDAProviderOptionsWithValue)
+
+		nameBytes, namePtr := GoToCstring("device_id")
+		valueBytes, valuePtr := GoToCstring(fmt.Sprintf("%d", deviceID))
+		status = updateOptionsFunc(cudaOptions, namePtr, valuePtr)
+		runtime.KeepAlive(nameBytes)
+		runtime.KeepAlive(valueBytes)
+		if status != 0 {
+			errMsg := getErrorMessage(status)
+			releaseStatus(status)
+			return fmt.Errorf("failed to set CUDA device ID: %s", errMsg)
+		}
+	}
+
+	status := appendFunc(o.handle, cudaOptions)
+	if status != 0 {
+		errMsg := getErrorMessage(status)
+		releaseStatus(status)
+		if cudaOptions != 0 {
+			var releaseOptionsFunc func(uintptr)
+			purego.RegisterFunc(&releaseOptionsFunc, ortAPI.ReleaseCUDAProviderOptions)
+			releaseOptionsFunc(cudaOptions)
+		}
+		return fmt.Errorf("failed to append CUDA execution provider: %s", errMsg)
+	}
+
+	if cudaOptions != 0 {
+		var releaseOptionsFunc func(uintptr)
+		purego.RegisterFunc(&releaseOptionsFunc, ortAPI.ReleaseCUDAProviderOptions)
+		releaseOptionsFunc(cudaOptions)
+	}
+
+	return nil
 }
